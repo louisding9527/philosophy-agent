@@ -1,50 +1,47 @@
+name: philosophy-agent
+
 services:
-  app:
-    build:
-      context: ..
-      dockerfile: backend/Dockerfile
+  postgres:
+    image: postgres:16-alpine
+    container_name: philosophy-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
     ports:
-      - "8000:8000"
-    env_file:
-      - ../.env
-    depends_on:
-      - qdrant
-      - neo4j
-      - postgres
+      - "5432:5432"
     volumes:
-      - ../backend:/app
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   qdrant:
     image: qdrant/qdrant:latest
+    container_name: philosophy-qdrant
+    restart: unless-stopped
     ports:
-      - "6333:6333"
-      - "6334:6334"
+      - "6333:6333"   # REST API
+      - "6334:6334"   # gRPC
     volumes:
       - qdrant_data:/qdrant/storage
 
   neo4j:
     image: neo4j:5-community
-    ports:
-      - "7474:7474"
-      - "7687:7687"
+    container_name: philosophy-neo4j
+    restart: unless-stopped
     environment:
-      NEO4J_AUTH: neo4j/philosophy
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD}
+    ports:
+      - "7474:7474"   # 浏览器管理界面
+      - "7687:7687"   # Bolt 协议（后端连接用）
     volumes:
       - neo4j_data:/data
 
-  postgres:
-    image: postgres:16-alpine
-    ports:
-      - "5432:5432"
-    environment:
-      POSTGRES_DB: philosophy
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-    volumes:
-      - pg_data:/var/lib/postgresql/data
-
 volumes:
+  postgres_data:
   qdrant_data:
   neo4j_data:
-  pg_data:
