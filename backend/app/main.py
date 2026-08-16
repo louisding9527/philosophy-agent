@@ -129,6 +129,18 @@ async def home():
             .score { color: #ffd166; font-weight: 600; margin-right: 0.6rem; }
             .file { color: #8ecae6; }
             .hit-text { font-size: 0.85rem; line-height: 1.5; color: #e6e6ef; }
+            .log {
+                background: rgba(0, 0, 0, 0.35);
+                border-radius: 6px;
+                padding: 0.6rem;
+                font-size: 0.78rem;
+                font-family: ui-monospace, Consolas, monospace;
+                line-height: 1.6;
+                max-height: 220px;
+                overflow-y: auto;
+                margin-top: 0.5rem;
+                color: #c9d1d9;
+            }
         </style>
     </head>
     <body>
@@ -152,6 +164,7 @@ async def home():
                 </label>
                 <div class="muted" id="ingest-progress"></div>
                 <div class="bar"><div class="bar-fill" id="ingest-bar"></div></div>
+                <div class="log" id="ingest-log"></div>
                 <pre id="ingest-result"></pre>
             </div>
 
@@ -206,6 +219,13 @@ async def home():
                 show("ingest-result", "");
                 show("ingest-progress", "启动中…");
                 document.getElementById("ingest-bar").style.width = "0";
+                document.getElementById("ingest-log").innerHTML = "";
+                let lastLogLen = 0;
+                const stageNames = {
+                    title: "书名优化", convert: "格式转换", chunk: "分块",
+                    embed: "向量化", upsert: "写入向量库",
+                    skip: "指纹匹配，跳过", done: "完成"
+                };
                 const res = await api("/rag/ingest", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
@@ -218,12 +238,19 @@ async def home():
                     const total = s.total_documents || 1;
                     const pct = s.status === "running" ? Math.round((s.current_index + 1) / total * 100) : 100;
                     document.getElementById("ingest-bar").style.width = pct + "%";
+                    const stageLabel = stageNames[s.stage] || s.stage || "";
                     if (s.status === "running") {
-                        show("ingest-progress", "处理中 " + (s.current_file || "…") + "（" + (s.current_index + 1) + "/" + total + " 文档，已嵌入 " + s.embedded + " 片段，跳过 " + s.skipped + "）");
+                        show("ingest-progress", "处理中 " + (s.current_file || "…") + "（" + (s.current_index + 1) + "/" + total + " 文档）" + (stageLabel ? " · " + stageLabel : ""));
                     } else {
                         clearInterval(timer);
                         show("ingest-progress", "");
                         show("ingest-result", JSON.stringify(s.status === "done" ? s.result : { status: s.status, error: s.error }, null, 2));
+                    }
+                    if (s.log && s.log.length > lastLogLen) {
+                        const logEl = document.getElementById("ingest-log");
+                        logEl.insertAdjacentHTML("beforeend", s.log.slice(lastLogLen).map(l => "<div>" + esc(l) + "</div>").join(""));
+                        lastLogLen = s.log.length;
+                        logEl.scrollTop = logEl.scrollHeight;
                     }
                 }, 1500);
             }
@@ -252,7 +279,7 @@ async def home():
                 if (hits.length === 0) { el.innerHTML = '<p class="muted">无结果</p>'; return; }
                 el.innerHTML = hits.map(h =>
                     '<div class="hit"><div class="hit-head"><span class="score">' + h.score.toFixed(4) +
-                    '</span><span class="file">' + esc(h.filename || "") + '</span></div>' +
+                    '</span><span class="file">' + esc(h.title || h.filename || "") + '</span></div>' +
                     '<div class="hit-text">' + esc(h.text.length > 150 ? h.text.slice(0, 150) + "…" : h.text) + '</div></div>'
                 ).join("");
             }

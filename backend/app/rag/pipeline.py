@@ -14,11 +14,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 from uuid import NAMESPACE_URL, uuid5
+import re
 
 from app.rag.chunker import chunk_document
 from app.rag.embedding import get_embedder
 from app.rag.loader import load_directory, load_file
 from app.rag.vector_store import SearchHit, get_store
+
+EMBED_BATCH = 64  # 每批向量化的片段数，用于细粒度进度展示
 
 
 @dataclass
@@ -36,14 +39,20 @@ class IngestResult:
 
 @dataclass
 class ProgressEvent:
-    """入库过程中的进度事件（按文档粒度触发）。"""
+    """入库过程中的进度事件（按文档分阶段触发，用于前端阶段展示与执行日志）。"""
 
     index: int  # 当前文档序号（0 起）
     total: int  # 文档总数
     filename: str  # 当前文档名
+    stage: str  # title | convert | chunk | embed | upsert | skip | done
     embedded: int  # 累计写入片段数
     skipped: int  # 累计跳过片段数
-    phase: str  # loading（读取中）| done（该文档处理完）| skipped（指纹匹配，跳过）
+    message: str = ""  # 阶段细节，如 "向量化 128/356 片段"
+
+
+def _clean_title(filename: str) -> str:
+    """从文件名提取展示用书名：去扩展名，压缩多余分隔符。"""
+    return re.sub(r"[\s_\-—]+", " ", Path(filename).stem).strip()
 
 
 def _load_documents(path: str | Path) -> list:
@@ -96,35 +105,43 @@ def ingest(
             continue
         filename = fpath.name
 
-        # 文件指纹匹配 -> 整文档快跳过，连解析都省了
-        if not reset and store.document_stamp(document_id) == stamp:
-            unchanged_docs += 1
+        def emit(stage: str, message: str = "") -> None:
             if progress:
                 progress(
                     ProgressEvent(
                         index=index, total=len(files), filename=filename,
-                        embedded=embedded_total, skipped=skipped_total, phase="skipped",
+                        embedded=embedded_total, skipped=skipped_total,
+                        stage=stage, message=message,
                     )
                 )
+
+        # 文件指纹匹配 -> 整文档快跳过，连解析都省了
+        if not reset and store.document_stamp(document_id) == stamp:
+            unchanged_docs += 1
+            emit("skip")
             continue
 
-        if progress:
-            progress(
-                ProgressEvent(
-                    index=index, total=len(files), filename=filename,
-                    embedded=embedded_total, skipped=skipped_total, phase="loading",
-                )
-            )
+        emit("title")
+        title = _clean_title(filename)
+        emit("convert")
         doc = load_file(fpath)
         if doc is None:
             continue
+        doc.metadata["title"] = title
         doc_chunks = chunk_document(doc)
+        emit("chunk")
         existing = store.existing_hashes([chunk.id for chunk in doc_chunks])
         to_embed = [
             chunk for chunk in doc_chunks if existing.get(chunk.id) != chunk.text_hash
         ]
         if to_embed:
-            vectors = embedder.embed([chunk.text for chunk in to_embed])
+            vectors: list[list[float]] = []
+            for start in range(0, len(to_embed), EMBED_BATCH):
+                batch = to_embed[start : start + EMBED_BATCH]
+                vectors.extend(embedder.embed([chunk.text for chunk in batch]))
+                done = min(start + EMBED_BATCH, len(to_embed))
+                emit("embed", message=f"向量化 {done}/{len(to_embed)} 片段")
+            emit("upsert")
             store.upsert(to_embed, vectors)
         total_chunks += len(doc_chunks)
         embedded_total += len(to_embed)
@@ -136,13 +153,7 @@ def ingest(
             updated_docs += 1
         else:
             unchanged_docs += 1
-        if progress:
-            progress(
-                ProgressEvent(
-                    index=index, total=len(files), filename=filename,
-                    embedded=embedded_total, skipped=skipped_total, phase="done",
-                )
-            )
+        emit("done")
 
     documents = new_docs + updated_docs + unchanged_docs
     if documents == 0:

@@ -1,7 +1,8 @@
 import dataclasses
 import threading
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 import httpx
@@ -20,6 +21,17 @@ NTFY_URL = "https://ntfy.sh"
 NTFY_TOPIC = "louisding_9527"  # 用户手机 ntfy 已订阅的话题
 
 MAX_JOBS = 100  # 内存任务表上限，超出后丢弃已完成的旧任务
+MAX_LOG_LINES = 300  # 每个任务的执行日志行数上限
+
+STAGE_LABELS = {
+    "title": "书名优化",
+    "convert": "格式转换",
+    "chunk": "分块",
+    "embed": "向量化",
+    "upsert": "写入向量库",
+    "skip": "指纹匹配，跳过",
+    "done": "完成",
+}
 
 
 @dataclass
@@ -28,14 +40,25 @@ class Job:
 
     id: str
     status: str = "running"  # running | done | failed
+    stage: str = ""  # 当前处理阶段
     total_documents: int = 0
     current_index: int = 0
     current_file: str = ""
-    phase: str = ""
     embedded: int = 0
     skipped: int = 0
+    log: list[str] = field(default_factory=list)  # 执行日志（带时间戳）
     result: dict | None = None
     error: str | None = None
+
+
+def _log_line(message: str) -> str:
+    return f"[{datetime.now():%H:%M:%S}] {message}"
+
+
+def _append_log(job: Job, message: str) -> None:
+    job.log.append(_log_line(message))
+    if len(job.log) > MAX_LOG_LINES:
+        del job.log[: len(job.log) - MAX_LOG_LINES]
 
 
 def _notify(job: Job) -> None:
@@ -69,17 +92,29 @@ def _run_ingest_job(job: Job, path: str, reset: bool) -> None:
         job.total_documents = event.total
         job.current_index = event.index
         job.current_file = event.filename
-        job.phase = event.phase
+        job.stage = event.stage
         job.embedded = event.embedded
         job.skipped = event.skipped
+        label = STAGE_LABELS.get(event.stage, event.stage)
+        detail = f"（{event.message}）" if event.message else ""
+        _append_log(job, f"[{event.index + 1}/{event.total}] {event.filename}: {label}{detail}")
 
+    _append_log(job, "任务开始" + ("（清空集合重建）" if reset else "（增量同步）"))
     try:
         result = ingest(path, reset=reset, progress=on_progress)
         job.status = "done"
         job.result = dataclasses.asdict(result)
-    except ValueError as exc:
+        r = job.result
+        _append_log(
+            job,
+            f"入库完成：文档 {r['documents']}（新增 {r['documents_new']}、"
+            f"更新 {r['documents_updated']}、未变 {r['documents_unchanged']}），"
+            f"片段 {r['chunks']}（嵌入 {r['embedded']}、跳过 {r['skipped']}）",
+        )
+    except Exception as exc:  # 任何异常都标记失败，避免任务永远停在 running
         job.status = "failed"
         job.error = str(exc)
+        _append_log(job, f"入库失败：{exc}")
     _notify(job)
 
 
@@ -111,7 +146,7 @@ class SearchRequest(BaseModel):
 
 @router.post("/ingest", status_code=202)
 def ingest_documents(request: IngestRequest):
-    """异步入库：立即返回 job_id，用 GET /rag/ingest/status/{job_id} 轮询进度。"""
+    """异步入库：立即返回 job_id，用 GET /rag/ingest/status/{job_id} 轮询阶段进度与执行日志。"""
     job = _register_job()
     threading.Thread(
         target=_run_ingest_job, args=(job, request.path, request.reset), daemon=True
@@ -121,7 +156,7 @@ def ingest_documents(request: IngestRequest):
 
 @router.get("/ingest/status/{job_id}")
 def ingest_status(job_id: str):
-    """查询入库任务进度；任务完成后 result 为最终统计。"""
+    """查询入库任务进度；log 为带时间戳的执行日志，任务完成后 result 为最终统计。"""
     job = _jobs.get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="任务不存在或已被清理")
@@ -152,6 +187,7 @@ def search_chunks(request: SearchRequest):
             "index": hit.chunk.index,
             "source": hit.chunk.metadata.get("source"),
             "filename": hit.chunk.metadata.get("filename"),
+            "title": hit.chunk.metadata.get("title"),
         }
         for hit in hits
     ]

@@ -5,3 +5,7 @@ python-multipart>=0.0.9
 qdrant-client>=1.9.0
 sentence-transformers>=3.0.0
 markitdown[pdf,docx,pptx,xlsx]>=0.1.0
+# Windows + AMD GPU 向量化加速：torch-directml 自带 torch 2.4.1，
+# transformers 需 <5 才兼容；NVIDIA 用户可去掉本行并自行安装 CUDA 版 torch
+torch-directml>=0.2.5
+transformers>=4.41,<5

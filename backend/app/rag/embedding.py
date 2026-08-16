@@ -1,17 +1,74 @@
-"""文本向量化：基于本地 sentence-transformers 模型，不依赖外部 embedding 服务。"""
+"""文本向量化：基于本地 sentence-transformers 模型，优先用 GPU（DirectML）加速。
+
+DirectML（AMD/部分 NVIDIA）通过 torch-directml 启用；torch-directml 不支持
+inference 模式下的张量切片（version_counter 报错），因此用 no_grad 替代
+inference_mode。ST 的 @torch.inference_mode() 装饰器在导入时捕获函数对象，
+所以注册必须在导入 sentence_transformers 之前完成。
+"""
 
 from functools import lru_cache
-
-from sentence_transformers import SentenceTransformer
+from pathlib import Path
 
 from app.core.config import settings
 
+_DML_REGISTERED = False
+
+
+def _register_dml() -> bool:
+    """注册 DirectML 后端并替换 inference_mode，进程内只需一次。"""
+    global _DML_REGISTERED
+    if _DML_REGISTERED:
+        return True
+    try:
+        import torch
+        import torch_directml
+
+        torch.utils.rename_privateuse1_backend("dml")
+        torch._register_device_module("dml", torch_directml.PrivateUse1Module)
+        torch.inference_mode = lambda *args, **kwargs: torch.no_grad()
+        _DML_REGISTERED = True
+        return True
+    except Exception:
+        return False
+
+
+_DEVICE = settings.embedding_device
+if _DEVICE != "cpu" and _register_dml():
+    _DEVICE = "dml"
+
+from sentence_transformers import SentenceTransformer  # noqa: E402
+
+
+def _resolve_device() -> str:
+    """设备选择：settings 显式指定优先；否则有 DirectML 用 GPU，退回 CPU。"""
+    device = settings.embedding_device
+    if device and device != "auto":
+        return device
+    return "dml" if _DML_REGISTERED else "cpu"
+
+
+def _resolve_model_path(model_name: str) -> str:
+    """把模型名解析成本地缓存目录；走 transformers 的本地目录加载逻辑，
+    避免联网解析 revision 和意外触发下载。"""
+    try:
+        from huggingface_hub import try_to_load_from_cache
+
+        config_path = try_to_load_from_cache(model_name, "config.json")
+    except Exception:
+        config_path = None
+    if config_path and Path(config_path).parent.is_dir():
+        return str(Path(config_path).parent)
+    return model_name
+
 
 class Embedder:
-    """批量编码文本为归一化向量。模型首次使用时自动从 HuggingFace 下载。"""
+    """批量编码文本为归一化向量。模型首次使用时自动从 HuggingFace 下载（已缓存则离线加载）。"""
 
-    def __init__(self, model_name: str | None = None):
-        self.model = SentenceTransformer(model_name or settings.embedding_model)
+    def __init__(self, model_name: str | None = None, device: str | None = None):
+        self.device = device or _resolve_device()
+        self.model = SentenceTransformer(
+            _resolve_model_path(model_name or settings.embedding_model), device=self.device
+        )
 
     def embed(self, texts: list[str], batch_size: int = 32) -> list[list[float]]:
         """输入文本列表，输出与输入同序的余弦归一化向量列表。"""
