@@ -10,3 +10,6 @@ build/
 .trellis/.runtime/
 .trellis/.developer
 .trellis/workspace/
+
+# 语料库与上传文件不入库
+backend/data/

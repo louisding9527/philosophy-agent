@@ -6,6 +6,7 @@ class Settings(BaseSettings):
     llm_base_url: str = ""
     llm_provider: str = "anthropic"  # anthropic | openai
     llm_model: str = "deepseek-v4-flash"
+    embedding_model: str = "BAAI/bge-m3"
     database_url: str = ""
     qdrant_url: str = ""
     neo4j_uri: str = ""
