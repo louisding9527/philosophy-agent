@@ -10,13 +10,15 @@
     hits = search("什么是先验综合判断", top_k=5)
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 from uuid import NAMESPACE_URL, uuid5
 import re
 
+from app.database.records import DocumentRecord
 from app.rag.chunker import chunk_document
+from app.rag.cleaner import clean_text
 from app.rag.embedding import get_embedder
 from app.rag.loader import load_directory, load_file
 from app.rag.vector_store import SearchHit, get_store
@@ -35,6 +37,7 @@ class IngestResult:
     documents_new: int  # 新入库的文档数
     documents_updated: int  # 内容变化的文档数
     documents_unchanged: int  # 未变化的文档数（含文件指纹匹配的快跳过）
+    documents_detail: list[DocumentRecord] = field(default_factory=list)  # 逐文档记录
 
 
 @dataclass
@@ -53,6 +56,17 @@ class ProgressEvent:
 def _clean_title(filename: str) -> str:
     """从文件名提取展示用书名：去扩展名，压缩多余分隔符。"""
     return re.sub(r"[\s_\-—]+", " ", Path(filename).stem).strip()
+
+
+def _clean_book(title: str) -> str:
+    """从清洗后书名剥离尾部括号片段（如 (z-library.sk, 1lib.sk, z-lib.sk)）。"""
+    book = title
+    while True:
+        cleaned = re.sub(r"\s*[（(][^）)]*[）)]\s*$", "", book).strip()
+        if cleaned == book:
+            break
+        book = cleaned
+    return book or title
 
 
 def _load_documents(path: str | Path) -> list:
@@ -96,6 +110,7 @@ def ingest(
 
     total_chunks = embedded_total = skipped_total = 0
     new_docs = updated_docs = unchanged_docs = 0
+    detail: list[DocumentRecord] = []
     for index, file in enumerate(files):
         fpath = file.resolve()
         document_id = str(uuid5(NAMESPACE_URL, str(fpath)))
@@ -104,6 +119,8 @@ def ingest(
         except OSError:
             continue
         filename = fpath.name
+        title = _clean_title(filename)
+        book = _clean_book(title)
 
         def emit(stage: str, message: str = "") -> None:
             if progress:
@@ -118,16 +135,44 @@ def ingest(
         # 文件指纹匹配 -> 整文档快跳过，连解析都省了
         if not reset and store.document_stamp(document_id) == stamp:
             unchanged_docs += 1
+            detail.append(
+                DocumentRecord(
+                    document_id=document_id, filename=filename,
+                    title=title, book=book,
+                    path=str(fpath), size=stamp["size"], mtime=stamp["mtime"],
+                    chunks=0, embedded=0, skipped=0, status="unchanged",
+                    warning="指纹匹配快跳过",
+                )
+            )
             emit("skip")
             continue
 
         emit("title")
-        title = _clean_title(filename)
         emit("convert")
         doc = load_file(fpath)
         if doc is None:
             continue
         doc.metadata["title"] = title
+        doc.metadata["book"] = book
+        cleaned = clean_text(doc.text)
+        if not cleaned.valid:
+            warning = "；".join(cleaned.warnings) or "清洗校验未通过"
+            detail.append(
+                DocumentRecord(
+                    document_id=document_id, filename=filename, title=title,
+                    book=doc.metadata["book"], path=str(fpath),
+                    size=stamp["size"], mtime=stamp["mtime"],
+                    chunks=0, embedded=0, skipped=0, status="skipped", warning=warning,
+                )
+            )
+            emit("skip", message=warning)
+            continue
+        doc.text = cleaned.text
+        notes = []
+        if cleaned.removed_lines:
+            notes.append(f"移除噪音行 {cleaned.removed_lines}")
+        notes.extend(cleaned.warnings)
+        emit("clean", message="，".join(notes))
         doc_chunks = chunk_document(doc)
         emit("chunk")
         existing = store.existing_hashes([chunk.id for chunk in doc_chunks])
@@ -149,10 +194,24 @@ def ingest(
         known = sum(1 for chunk in doc_chunks if chunk.id in existing)
         if known == 0:
             new_docs += 1
+            status = "new"
         elif to_embed:
             updated_docs += 1
+            status = "updated"
         else:
             unchanged_docs += 1
+            status = "unchanged"
+        detail.append(
+            DocumentRecord(
+                document_id=document_id, filename=filename, title=title,
+                book=doc.metadata["book"], path=str(fpath),
+                size=stamp["size"], mtime=stamp["mtime"],
+                chunks=len(doc_chunks), embedded=len(to_embed),
+                skipped=len(doc_chunks) - len(to_embed),
+                status=status,
+                warning="；".join(cleaned.warnings) if cleaned.warnings else None,
+            )
+        )
         emit("done")
 
     documents = new_docs + updated_docs + unchanged_docs
@@ -166,6 +225,7 @@ def ingest(
         documents_new=new_docs,
         documents_updated=updated_docs,
         documents_unchanged=unchanged_docs,
+        documents_detail=detail,
     )
 
 

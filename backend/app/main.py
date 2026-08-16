@@ -1,3 +1,6 @@
+import logging
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
@@ -6,11 +9,31 @@ from app.api.health import router as health_router
 from app.api.chat import router as chat_router
 from app.api.rag import router as rag_router
 from app.api.graph import router as graph_router
+from app.database.db import enabled as db_enabled
+from app.database.db import init_db
+
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """启动时初始化入库记录表；未配置 DATABASE_URL 则记录功能降级禁用。"""
+    if db_enabled():
+        try:
+            init_db()
+            logger.info("入库记录表就绪（PostgreSQL）")
+        except Exception as exc:
+            logger.warning("入库记录表初始化失败，记录功能禁用：%s", exc)
+    else:
+        logger.warning("DATABASE_URL 未配置，入库记录功能禁用")
+    yield
+
 
 app = FastAPI(
     title="Philosophy Agent",
     description="AI 哲学思辨代理",
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 # 开发阶段放开跨域，前端联调后再收紧
@@ -195,6 +218,12 @@ async def home():
                 </div>
                 <pre id="prune-result"></pre>
             </div>
+
+            <div class="card">
+                <h3>📋 入库记录</h3>
+                <button onclick="loadRecords()">刷新记录</button>
+                <div id="records-result"></div>
+            </div>
         </div>
 
         <script>
@@ -222,7 +251,7 @@ async def home():
                 document.getElementById("ingest-log").innerHTML = "";
                 let lastLogLen = 0;
                 const stageNames = {
-                    title: "书名优化", convert: "格式转换", chunk: "分块",
+                    title: "书名优化", convert: "格式转换", clean: "文本清洗", chunk: "分块",
                     embed: "向量化", upsert: "写入向量库",
                     skip: "指纹匹配，跳过", done: "完成"
                 };
@@ -294,6 +323,45 @@ async def home():
                     body: JSON.stringify({ path: path })
                 });
                 show("prune-result", JSON.stringify(res, null, 2));
+            }
+
+            async function loadRecords() {
+                const el = document.getElementById("records-result");
+                el.innerHTML = '<p class="muted">加载中…</p>';
+                const data = await api("/rag/records?limit=20");
+                if (data.detail) { el.innerHTML = "<pre>" + esc(JSON.stringify(data)) + "</pre>"; return; }
+                if (!Array.isArray(data) || data.length === 0) { el.innerHTML = '<p class="muted">暂无记录</p>'; return; }
+                const rows = data.map(t => {
+                    const started = String(t.started_at || "").replace("T", " ").slice(0, 19);
+                    const stat = t.documents != null ? t.documents + " 文档 / " + t.chunks + " 片段" : "—";
+                    return '<tr style="border-top:1px solid rgba(255,255,255,0.08);cursor:pointer;" onclick="loadRecordDetail(\'' + t.id + '\')">' +
+                        '<td style="padding:4px;white-space:nowrap;">' + started + '</td>' +
+                        '<td style="padding:4px;">' + t.kind + '</td>' +
+                        '<td style="padding:4px;word-break:break-all;">' + esc(t.path) + '</td>' +
+                        '<td style="padding:4px;">' + (t.status === "done" ? "✅ 完成" : "❌ 失败") + '</td>' +
+                        '<td style="padding:4px;">' + stat + '</td></tr>';
+                }).join("");
+                el.innerHTML = '<table style="width:100%;border-collapse:collapse;font-size:0.8rem;">' +
+                    '<tr><th style="text-align:left;padding:4px;">时间</th><th style="text-align:left;padding:4px;">类型</th>' +
+                    '<th style="text-align:left;padding:4px;">路径</th><th style="text-align:left;padding:4px;">状态</th>' +
+                    '<th style="text-align:left;padding:4px;">文档/片段</th></tr>' + rows +
+                    '</table><div id="record-detail"></div>';
+            }
+
+            async function loadRecordDetail(taskId) {
+                const el = document.getElementById("record-detail");
+                el.innerHTML = '<p class="muted">加载中…</p>';
+                const data = await api("/rag/records/" + taskId);
+                if (data.detail) { el.innerHTML = "<pre>" + esc(JSON.stringify(data)) + "</pre>"; return; }
+                const docs = (data.documents || []).map(d =>
+                    '<div class="hit"><div class="hit-head"><span class="file">' + esc(d.filename) + '</span>' +
+                    '<span class="muted"> · ' + esc(d.book || "") + '</span>' +
+                    '<span class="muted"> · 片段 ' + d.chunks + '（嵌入 ' + d.embedded + '）</span>' +
+                    '<span class="muted"> · ' + d.status + '</span></div>' +
+                    (d.warning ? '<div class="hit-text" style="color:#ffd166;">⚠ ' + esc(d.warning) + '</div>' : '') +
+                    '</div>'
+                ).join("") || '<p class="muted">无文档明细</p>';
+                el.innerHTML = docs;
             }
         </script>
     </body>

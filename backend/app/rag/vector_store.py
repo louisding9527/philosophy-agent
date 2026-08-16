@@ -39,7 +39,7 @@ class SearchHit:
 class VectorStore:
     def __init__(self, url: str | None = None, collection: str | None = None):
         self.client = QdrantClient(url=url or settings.qdrant_url)
-        self.collection = collection or "philosophy_chunks"
+        self.collection = collection or "philosophy"
 
     def ensure_collection(self, vector_size: int) -> None:
         """集合不存在则创建；已存在但向量维度不符时报错。"""

@@ -6,10 +6,13 @@ inference_mode。ST 的 @torch.inference_mode() 装饰器在导入时捕获函�
 所以注册必须在导入 sentence_transformers 之前完成。
 """
 
+import logging
 from functools import lru_cache
 from pathlib import Path
 
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 _DML_REGISTERED = False
 
@@ -83,15 +86,26 @@ class Embedder:
         self.batch_size = 16 if self.device == "dml" else 32
 
     def embed(self, texts: list[str], batch_size: int | None = None) -> list[list[float]]:
-        """输入文本列表，输出与输入同序的余弦归一化向量列表。"""
+        """输入文本列表，输出与输入同序的余弦归一化向量列表。
+
+        显存不足（其他程序占用 GPU 时常见）自动降半 batch 重试，
+        避免整批向量化失败；batch 降到 1 仍失败则原样抛出。
+        """
         if not texts:
             return []
-        vectors = self.model.encode(
-            texts,
-            batch_size=batch_size or self.batch_size,
-            normalize_embeddings=True,
-            show_progress_bar=False,
-        )
+        batch = batch_size or self.batch_size
+        try:
+            vectors = self.model.encode(
+                texts,
+                batch_size=batch,
+                normalize_embeddings=True,
+                show_progress_bar=False,
+            )
+        except RuntimeError as exc:
+            if "video memory" not in str(exc) or batch <= 1:
+                raise
+            logger.warning("向量化 batch %s 显存不足，降为 %s 重试：%s", batch, batch // 2, exc)
+            return self.embed(texts, batch_size=batch // 2)
         return vectors.tolist()
 
     @property

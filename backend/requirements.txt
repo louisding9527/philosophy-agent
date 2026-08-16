@@ -3,6 +3,8 @@ uvicorn[standard]>=0.30.0
 pydantic-settings>=2.0.0
 python-multipart>=0.0.9
 qdrant-client>=1.9.0
+# 入库记录表（PostgreSQL）；同步驱动，贴合应用 threading 模型
+psycopg[binary]>=3.1
 sentence-transformers>=3.0.0
 markitdown[pdf,docx,pptx,xlsx]>=0.1.0
 # Windows + AMD GPU 向量化加速：torch-directml 自带 torch 2.4.1，

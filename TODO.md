@@ -6,7 +6,8 @@
 - [ ] 显存优化备选：分块改小到 400 字（attention 显存 4 倍减负，权衡：检索粒度变细）
 - [ ] 长序列性能备选：换 ONNX Runtime DirectML 后端（fused attention，长序列更高效）
 - [ ] 大语料扩展：ingest/prune 的全集合扫描改为元数据表（片段数万级后再做）
-- [ ] 任务表持久化：服务重启后进行中任务丢失（当前靠幂等重跑兜底）
+- [ ] 任务表持久化：服务重启后进行中任务（running）丢失（入库结果已落库，见已解决；进行中任务的恢复另做）
+- [ ] 道德经文件拆分：帛书原文 + 译文精简版同文件，章节标签重复，拆为独立文档
 
 ## 已解决（历史）
 
@@ -16,3 +17,6 @@
 - [x] ingest 与 prune 解耦 → prune 显式清理已删除文档
 - [x] 入库完成通知 → ntfy 手机推送（成功/失败）
 - [x] 多格式文档入库 → markitdown 转 Markdown（pdf/docx/pptx/xlsx/html/GBK 兜底）
+- [x] 入库记录持久化 → PostgreSQL ingest_tasks/ingest_documents 两表 + /rag/records API（重启后仍在）
+- [x] 源头校验清洗 → cleaner.py（无损清洗 + 校验门禁），分块前保证文本干净
+- [x] 片段元数据带 book/chapter → 章节启发式提取（md 标题 + txt 章节标记）+ 集合改名 philosophy

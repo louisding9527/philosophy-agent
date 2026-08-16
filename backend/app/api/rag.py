@@ -1,8 +1,9 @@
 import dataclasses
+import logging
 import threading
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
@@ -10,10 +11,13 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
+from app.database import records as records_db
+from app.database.db import enabled as db_enabled
 from app.rag import ingest, prune, search
 from app.rag.pipeline import ProgressEvent
 
 router = APIRouter(prefix="/rag", tags=["rag"])
+logger = logging.getLogger(__name__)
 
 UPLOAD_DIR = Path(__file__).resolve().parents[2] / "data" / "uploads"
 
@@ -26,6 +30,7 @@ MAX_LOG_LINES = 300  # 每个任务的执行日志行数上限
 STAGE_LABELS = {
     "title": "书名优化",
     "convert": "格式转换",
+    "clean": "文本清洗",
     "chunk": "分块",
     "embed": "向量化",
     "upsert": "写入向量库",
@@ -49,6 +54,10 @@ class Job:
     log: list[str] = field(default_factory=list)  # 执行日志（带时间戳）
     result: dict | None = None
     error: str | None = None
+    kind: str = "directory"  # directory | file | upload（记录表用）
+    path: str = ""
+    reset: bool = False
+    started_at: datetime | None = None
 
 
 def _log_line(message: str) -> str:
@@ -87,7 +96,38 @@ def _notify(job: Job) -> None:
 _jobs: dict[str, Job] = {}
 
 
-def _run_ingest_job(job: Job, path: str, reset: bool) -> None:
+def _write_records(
+    task_id: str,
+    kind: str,
+    path: str,
+    reset: bool,
+    started_at: datetime,
+    result=None,
+    error: str | None = None,
+) -> None:
+    """尽力而为写入入库记录（任务概要 + 文档明细）；失败只记日志，不影响任务。"""
+    try:
+        records_db.create_task(
+            task_id=task_id,
+            kind=kind,
+            path=path,
+            reset=reset,
+            started_at=started_at,
+            finished_at=datetime.now(timezone.utc),
+            result=dataclasses.asdict(result) if result else None,
+            documents=result.documents_detail if result else None,
+            error=error,
+        )
+    except Exception as exc:
+        logger.warning("入库记录写入失败（id=%s）：%s", task_id, exc)
+
+
+def _run_ingest_job(job: Job, path: str, reset: bool, kind: str) -> None:
+    job.kind = kind
+    job.path = path
+    job.reset = reset
+    job.started_at = datetime.now(timezone.utc)
+
     def on_progress(event: ProgressEvent) -> None:
         job.total_documents = event.total
         job.current_index = event.index
@@ -111,10 +151,14 @@ def _run_ingest_job(job: Job, path: str, reset: bool) -> None:
             f"更新 {r['documents_updated']}、未变 {r['documents_unchanged']}），"
             f"片段 {r['chunks']}（嵌入 {r['embedded']}、跳过 {r['skipped']}）",
         )
+        _write_records(job.id, job.kind, job.path, job.reset, job.started_at, result=result)
     except Exception as exc:  # 任何异常都标记失败，避免任务永远停在 running
         job.status = "failed"
         job.error = str(exc)
         _append_log(job, f"入库失败：{exc}")
+        _write_records(
+            job.id, job.kind, job.path, job.reset, job.started_at, error=str(exc)
+        )
     _notify(job)
 
 
@@ -148,8 +192,9 @@ class SearchRequest(BaseModel):
 def ingest_documents(request: IngestRequest):
     """异步入库：立即返回 job_id，用 GET /rag/ingest/status/{job_id} 轮询阶段进度与执行日志。"""
     job = _register_job()
+    kind = "file" if Path(request.path).is_file() else "directory"
     threading.Thread(
-        target=_run_ingest_job, args=(job, request.path, request.reset), daemon=True
+        target=_run_ingest_job, args=(job, request.path, request.reset, kind), daemon=True
     ).start()
     return {"job_id": job.id, "status": job.status}
 
@@ -161,6 +206,25 @@ def ingest_status(job_id: str):
     if job is None:
         raise HTTPException(status_code=404, detail="任务不存在或已被清理")
     return dataclasses.asdict(job)
+
+
+@router.get("/records")
+def list_records(limit: int = 20):
+    """最近入库任务列表（按开始时间倒序，来自 PostgreSQL 记录表）。"""
+    if not db_enabled():
+        raise HTTPException(status_code=503, detail="入库记录功能未启用（未配置 DATABASE_URL）")
+    return records_db.list_tasks(limit=max(1, min(limit, 100)))
+
+
+@router.get("/records/{task_id}")
+def get_record(task_id: str):
+    """任务概要 + 该任务的文档明细。"""
+    if not db_enabled():
+        raise HTTPException(status_code=503, detail="入库记录功能未启用（未配置 DATABASE_URL）")
+    task = records_db.get_task(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="记录不存在")
+    return task
 
 
 @router.post("/prune")
@@ -188,6 +252,8 @@ def search_chunks(request: SearchRequest):
             "source": hit.chunk.metadata.get("source"),
             "filename": hit.chunk.metadata.get("filename"),
             "title": hit.chunk.metadata.get("title"),
+            "book": hit.chunk.metadata.get("book"),
+            "chapter": hit.chunk.metadata.get("chapter"),
         }
         for hit in hits
     ]
@@ -201,6 +267,11 @@ async def upload_document(file: UploadFile = File(...)):
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(await file.read())
     try:
-        return await run_in_threadpool(ingest, target)
+        result = await run_in_threadpool(ingest, target)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    _write_records(
+        uuid.uuid4().hex, "upload", str(target), False,
+        datetime.now(timezone.utc), result=result,
+    )
+    return result
