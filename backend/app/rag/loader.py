@@ -43,11 +43,17 @@ def load_file(path: Path) -> Document | None:
     """读取单个文件；扩展名不受支持、编码不识别或转换失败时返回 None。"""
     path = path.resolve()
     if path.suffix.lower() in DIRECT_SUFFIXES:
-        try:
-            text = path.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            text = _convert_to_markdown(path)  # 非 UTF-8（如 GBK）兜底
-        if not text:
+        text = None
+        for encoding in ("utf-8", "gb18030"):
+            try:
+                text = path.read_text(encoding=encoding)
+                break
+            except UnicodeDecodeError:
+                continue
+        if text is None:
+            text = _convert_to_markdown(path)  # 仍失败（如 UTF-16）走 markitdown
+        # markitdown 对部分 txt 会返回字面量 "None"，视为转换失败
+        if not text or text.strip() == "None":
             return None
     else:
         text = _convert_to_markdown(path)

@@ -67,16 +67,28 @@ class Embedder:
     def __init__(self, model_name: str | None = None, device: str | None = None):
         self.device = device or _resolve_device()
         self.model = SentenceTransformer(
-            _resolve_model_path(model_name or settings.embedding_model), device=self.device
+            _resolve_model_path(model_name or settings.embedding_model),
+            device=self.device,
+            # torch-directml 的 fp16 SDPA 路径会触发 dml_util.h DML_CHECK 崩溃，
+            # 用 eager 注意力绕开（fp32 不受影响）
+            model_kwargs={"attn_implementation": "eager"},
         )
+        # DirectML 下用 fp16：显存与计算量减半，长片段（800 字左右）不容易撑爆显存
+        if self.device == "dml":
+            try:
+                self.model[0].model.half()
+            except Exception:
+                pass
+        # DML 长片段 attention 显存按 batch 线性增长，16 为稳定值
+        self.batch_size = 16 if self.device == "dml" else 32
 
-    def embed(self, texts: list[str], batch_size: int = 32) -> list[list[float]]:
+    def embed(self, texts: list[str], batch_size: int | None = None) -> list[list[float]]:
         """输入文本列表，输出与输入同序的余弦归一化向量列表。"""
         if not texts:
             return []
         vectors = self.model.encode(
             texts,
-            batch_size=batch_size,
+            batch_size=batch_size or self.batch_size,
             normalize_embeddings=True,
             show_progress_bar=False,
         )

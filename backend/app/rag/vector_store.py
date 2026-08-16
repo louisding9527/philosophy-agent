@@ -1,8 +1,13 @@
 """Qdrant 向量存储：集合管理、批量写入与相似度检索。"""
 
+import os
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Iterable
+
+# Windows 系统代理（注册表）会让 qdrant 的 localhost 请求绕经代理，大载荷下连接易被中断
+os.environ.setdefault("NO_PROXY", "127.0.0.1,localhost")
+os.environ.setdefault("no_proxy", "127.0.0.1,localhost")
 
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
@@ -19,6 +24,8 @@ from app.core.config import settings
 from app.rag.chunker import Chunk
 
 RESERVED_PAYLOAD_KEYS = {"text", "document_id", "index", "hash"}
+
+UPSERT_BATCH = 500  # 每批写入点数；1024 维向量 JSON 约 20KB/个，500 点 ≈ 11MB，低于 qdrant 32MB 请求上限
 
 
 @dataclass
@@ -62,7 +69,10 @@ class VectorStore:
         )
 
     def upsert(self, chunks: Iterable[Chunk], vectors: Iterable[list[float]]) -> int:
-        """批量写入 chunk 与对应向量；同 id 重复写入视为覆盖，返回写入条数。"""
+        """批量写入 chunk 与对应向量；同 id 重复写入视为覆盖，返回写入条数。
+
+        大文档片段数可能上万，单请求 JSON 会超过 qdrant 32MB 上限，因此分批提交。
+        """
         points = []
         for chunk, vector in zip(chunks, vectors):
             points.append(
@@ -78,7 +88,10 @@ class VectorStore:
                     },
                 )
             )
-        self.client.upsert(collection_name=self.collection, points=points)
+        for start in range(0, len(points), UPSERT_BATCH):
+            self.client.upsert(
+                collection_name=self.collection, points=points[start : start + UPSERT_BATCH]
+            )
         return len(points)
 
     def existing_hashes(self, ids: list[str]) -> dict[str, str]:
