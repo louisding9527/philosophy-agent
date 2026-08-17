@@ -49,3 +49,13 @@ Questions to answer:
 <!-- Database-related mistakes your team has made -->
 
 (To be filled by the team)
+
+---
+
+## Neo4j（图库，2026-08-17 接线）
+
+- 入库时把「书 → 章节 → 片段」结构同步成图：`(:Book)-[:HAS_CHAPTER]->(:Chapter {book,title})-[:HAS_CHUNK]->(:Chunk {id,...})`；chapter 为空的片段跳过 Chapter 节点直挂 Book。
+- 写入全用 MERGE 幂等（Chunk 按稳定 uuid5 id、Chapter 按 (book,title)），重复入库只覆盖属性不新增节点。
+- best-effort：未配置 `NEO4J_URI` 或连接/写入失败仅 `logger.warning`，不影响 ingest 主流程（与 postgres 入库记录同原则）。
+- 凭据：`NEO4J_URI` + `NEO4J_PASSWORD`（user 固定 neo4j，对应 docker-compose 的 `NEO4J_AUTH: neo4j/${NEO4J_PASSWORD}`），两者需同步。
+- 驱动 `neo4j>=5.0`（现装 6.2.0，`GraphDatabase.driver` API 兼容）；写入批次 500 与 Qdrant 一致。

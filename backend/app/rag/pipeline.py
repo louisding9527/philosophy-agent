@@ -21,6 +21,7 @@ from app.rag.chunker import chunk_document
 from app.rag.cleaner import clean_text
 from app.rag.embedding import get_embedder
 from app.rag.loader import load_directory, load_file
+from app.rag.neo4j_store import get_graph_store
 from app.rag.vector_store import SearchHit, get_store
 
 EMBED_BATCH = 64  # 每批向量化的片段数，用于细粒度进度展示
@@ -103,8 +104,10 @@ def ingest(
 
     embedder = get_embedder()
     store = get_store()
+    graph = get_graph_store()
     if reset:
         store.reset_collection(embedder.dim)
+        graph.reset()
     else:
         store.ensure_collection(embedder.dim)
 
@@ -188,6 +191,7 @@ def ingest(
                 emit("embed", message=f"向量化 {done}/{len(to_embed)} 片段")
             emit("upsert")
             store.upsert(to_embed, vectors)
+            graph.upsert(to_embed)
         total_chunks += len(doc_chunks)
         embedded_total += len(to_embed)
         skipped_total += len(doc_chunks) - len(to_embed)
@@ -244,6 +248,7 @@ def prune(path: str | Path) -> int:
     orphan_ids = sorted(store.document_ids() - current_ids)
     if orphan_ids:
         store.delete_documents(orphan_ids)
+        get_graph_store().delete_documents(orphan_ids)
     return len(orphan_ids)
 
 

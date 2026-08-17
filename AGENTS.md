@@ -28,7 +28,7 @@ AI 哲学思辨代理：FastAPI 后端 + 本地 RAG 知识库，语料为中外�
 
 - `backend/app/` — FastAPI 应用。`api/` 路由（chat/rag/graph/health），`core/config.py` 环境配置，`rag/` 完整 RAG 管线（loader → chunker → embedding → vector_store → batch_to_md），planner/memory/tools/services 目前是空壳
 - `backend/data/` — 语料库（books/sources/test_corpus，已被 .gitignore 忽略，不入库）
-- `docker/` — docker-compose.yml：postgres / qdrant / neo4j 三个容器；**应用实际只用了 Qdrant**，postgres 与 neo4j 未接线
+- `docker/` — docker-compose.yml：postgres / qdrant / neo4j 三个容器；Qdrant 是 RAG 检索库，postgres 存入库记录，neo4j 在入库时同步写「书 → 章节 → 片段」结构图（`rag/neo4j_store.py`，best-effort）
 - `start-dev.ps1` — 一键启动：自动拉起 Docker Desktop → compose up → 等 postgres healthy → `uv run uvicorn app.main:app --reload`（8000 端口）
 - `frontend/`、`prompts/`、`scripts/` — 空壳（.gitkeep）
 - `TODO.md` — 项目待办（待办/已解决两节），后续跟进项追加在这里
@@ -54,6 +54,7 @@ AI 哲学思辨代理：FastAPI 后端 + 本地 RAG 知识库，语料为中外�
 - ingest 完成/失败通过 ntfy（话题 louisding_9527）推送到手机
 - 文件指纹（size+mtime）快跳过 + 片段哈希兜底；文档清理需显式调 prune
 - Qdrant upsert 分批 500 点/批（单请求 JSON 低于 32MB 上限），删文档按 id 前缀分片 1000
+- Neo4j 图同步（`rag/neo4j_store.py`）：入库 upsert 后同批写入 `Book -HAS_CHAPTER-> Chapter -HAS_CHUNK-> Chunk`（无章节片段直挂 Book）；全部 MERGE 幂等；`reset=True` 清空图、prune 级联清理孤儿；未配置 `NEO4J_URI` 或写入失败仅告警，不影响 ingest 主流程
 - loader 编码回退：utf-8 → gb18030 → markitdown；markitdown 返回字面量 "None" 视为失败
 - 任务表未持久化，服务重启后任务丢失（当前靠幂等重跑兜底）
 

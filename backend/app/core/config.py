@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     database_url: str = ""
     qdrant_url: str = ""
     neo4j_uri: str = ""
+    neo4j_password: str = ""
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
