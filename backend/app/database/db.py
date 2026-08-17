@@ -64,14 +64,24 @@ def enabled() -> bool:
 
 
 def _normalize_url(url: str) -> str:
-    """兼容旧示例里的 postgresql+asyncpg 协议后缀（psycopg 用纯 postgresql://）。"""
-    return url.replace("postgresql+asyncpg://", "postgresql://")
+    """规范化连接串：去 +asyncpg 协议后缀；localhost 强制换 127.0.0.1。
+
+    本机 localhost 优先解析到 ::1，IPv6 端口未映射时 connect 会被静默丢弃，
+    libpq 要等 OS 级超时（数十秒）才回落 IPv4 —— 每次请求都卡。
+    """
+    url = url.replace("postgresql+asyncpg://", "postgresql://")
+    # host 在 URL 中位于 @ 之后（或开头）；替换为 IPv4 直连
+    return url.replace("@localhost:", "@127.0.0.1:")
 
 
 @contextmanager
 def connection():
     """数据库连接上下文；调用方负责事务（commit/rollback），退出时关闭连接。"""
-    conn = connect(_normalize_url(settings.database_url), row_factory=dict_row)
+    conn = connect(
+        _normalize_url(settings.database_url),
+        connect_timeout=10,
+        row_factory=dict_row,
+    )
     try:
         yield conn
     finally:
