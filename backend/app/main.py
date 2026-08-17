@@ -298,12 +298,13 @@ async def home():
                 const q = document.getElementById("search-query").value.trim();
                 if (!q) { alert("请输入问题"); return; }
                 const top_k = parseInt(document.getElementById("search-topk").value) || 5;
+                const el = document.getElementById("search-result");
+                el.innerHTML = '<p class="muted">🔍 检索中…（首次检索需加载模型，约几秒）</p>';
                 const hits = await api("/rag/search", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ query: q, top_k: top_k })
                 });
-                const el = document.getElementById("search-result");
                 if (!Array.isArray(hits)) { el.innerHTML = "<pre>" + esc(JSON.stringify(hits)) + "</pre>"; return; }
                 if (hits.length === 0) { el.innerHTML = '<p class="muted">无结果</p>'; return; }
                 el.innerHTML = hits.map(h =>
