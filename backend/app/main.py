@@ -334,7 +334,7 @@ async def home():
                 const rows = data.map(t => {
                     const started = String(t.started_at || "").replace("T", " ").slice(0, 19);
                     const stat = t.documents != null ? t.documents + " 文档 / " + t.chunks + " 片段" : "—";
-                    return '<tr style="border-top:1px solid rgba(255,255,255,0.08);cursor:pointer;" onclick="loadRecordDetail(\'' + t.id + '\')">' +
+                    return '<tr style="border-top:1px solid rgba(255,255,255,0.08);cursor:pointer;" onclick="loadRecordDetail(\'+t.id+\')">' +
                         '<td style="padding:4px;white-space:nowrap;">' + started + '</td>' +
                         '<td style="padding:4px;">' + t.kind + '</td>' +
                         '<td style="padding:4px;word-break:break-all;">' + esc(t.path) + '</td>' +
